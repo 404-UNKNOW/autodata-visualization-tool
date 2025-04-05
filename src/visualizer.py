@@ -12,6 +12,7 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')  # 忽略警告
 from plotly.subplots import make_subplots
+import streamlit as st
 
 
 class Visualizer:
@@ -32,6 +33,7 @@ class Visualizer:
         plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
         plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
     
+    @st.cache_data(ttl=3600)
     def distribution_plot(self, column: str, bins: int = 30, 
                          kde: bool = True, fig_size: Tuple[int, int] = (10, 6)) -> plt.Figure:
         """绘制数值分布图
@@ -95,6 +97,7 @@ class Visualizer:
         plt.tight_layout()
         return plt.gcf()
     
+    @st.cache_data(ttl=3600)
     def correlation_heatmap(self, columns: Optional[List[str]] = None, 
                           fig_size: Tuple[int, int] = (12, 10)) -> plt.Figure:
         """绘制相关系数热力图
@@ -1307,4 +1310,65 @@ class Visualizer:
                 ay=anno.get('ay', -40)
             )
         
-        return fig 
+        return fig
+    
+    def plot_shap_values(self, model, X, feature_names=None, plot_type='bar', max_display=10):
+        """绘制SHAP值分析图
+        
+        Args:
+            model: 训练好的模型对象
+            X: 特征数据
+            feature_names: 特征名称列表
+            plot_type: 图表类型，可选 'bar', 'beeswarm', 'waterfall', 'force'
+            max_display: 最多显示的特征数量
+            
+        Returns:
+            matplotlib图形对象
+        """
+        try:
+            import shap
+            
+            # 创建SHAP解释器
+            if hasattr(model, 'predict_proba'):
+                explainer = shap.Explainer(model, X)
+                shap_values = explainer(X)
+            else:
+                explainer = shap.Explainer(model, X)
+                shap_values = explainer(X)
+            
+            # 创建图形
+            plt.figure(figsize=(10, 8))
+            
+            if plot_type == 'bar':
+                shap.plots.bar(shap_values, max_display=max_display, show=False)
+            elif plot_type == 'beeswarm':
+                shap.plots.beeswarm(shap_values, max_display=max_display, show=False)
+            elif plot_type == 'waterfall':
+                if len(X) > 0:
+                    shap.plots.waterfall(shap_values[0], max_display=max_display, show=False)
+                else:
+                    return None
+            elif plot_type == 'force':
+                if len(X) > 0:
+                    shap.plots.force(shap_values[0], matplotlib=True, show=False)
+                else:
+                    return None
+            else:
+                raise ValueError(f"不支持的图表类型: {plot_type}")
+            
+            plt.tight_layout()
+            return plt.gcf()
+            
+        except ImportError:
+            plt.figure(figsize=(8, 6))
+            plt.text(0.5, 0.5, "需要安装SHAP库以使用此功能\n运行 'pip install shap' 安装", 
+                    horizontalalignment='center', verticalalignment='center', fontsize=14)
+            plt.axis('off')
+            return plt.gcf()
+        
+        except Exception as e:
+            plt.figure(figsize=(8, 6))
+            plt.text(0.5, 0.5, f"生成SHAP分析时出错:\n{str(e)}", 
+                    horizontalalignment='center', verticalalignment='center', fontsize=12)
+            plt.axis('off')
+            return plt.gcf() 

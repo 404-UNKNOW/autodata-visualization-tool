@@ -3,6 +3,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Union, Tuple
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import streamlit as st
 
 
 class DataProcessor:
@@ -21,6 +22,7 @@ class DataProcessor:
         """重置数据到原始状态"""
         self.df = self.original_df.copy()
     
+    @st.cache_data(ttl=3600)
     def get_basic_info(self) -> Dict[str, Any]:
         """获取数据基本信息
         
@@ -38,6 +40,7 @@ class DataProcessor:
         }
         return info
     
+    @st.cache_data(ttl=3600)
     def get_statistics(self) -> Dict[str, Any]:
         """获取数据统计信息
         
@@ -156,6 +159,7 @@ class DataProcessor:
         self.df[feature_name] = eval(f"self.df.{expression}")
         return self
     
+    @st.cache_data(ttl=3600)
     def get_correlation(self, method: str = 'pearson') -> pd.DataFrame:
         """计算数值型列的相关系数
         

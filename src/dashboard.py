@@ -11,6 +11,7 @@ from src.data_processor import DataProcessor
 from src.visualizer import Visualizer
 from src.ml_model import MLModel  # 导入新增的机器学习模块
 from src.data_loader import DataLoader  # 导入数据加载器
+from src.ui_components import UIComponents  # 导入UI组件
 
 
 class Dashboard:
@@ -27,6 +28,7 @@ class Dashboard:
         self.processor = None
         self.visualizer = None
         self.ml_model = None  # 新增机器学习模型属性
+        self.ui = UIComponents()  # 创建UI组件对象
     
     def run(self):
         """运行Streamlit应用"""
@@ -45,23 +47,23 @@ class Dashboard:
             
             # 数据概览选项卡
             with tabs[0]:
-                self._render_data_overview()
+                self.ui.render_data_overview_tab(self.df, self.visualizer)
             
             # 数据处理选项卡
             with tabs[1]:
-                self._render_data_processing()
+                self.ui.render_data_processing_tab(self.df, self.processor, self._update_data)
             
             # 数据可视化选项卡
             with tabs[2]:
-                self._render_data_visualization()
+                self.ui.render_data_visualization_tab(self.df, self.visualizer)
             
             # 机器学习选项卡
             with tabs[3]:
-                self._render_machine_learning()
+                self.ui.render_machine_learning_tab(self.df, self.ml_model)
             
             # 数据报告选项卡
             with tabs[4]:
-                self._render_data_report()
+                self.ui.render_data_report_tab(self.df, self.visualizer)
     
     def _load_data_sidebar(self):
         """侧边栏 - 数据加载部分"""
@@ -248,36 +250,43 @@ class Dashboard:
                             value='{"Content-Type": "application/json"}',
                             help="输入请求头，JSON格式"
                         )
+                        
+                        # 数据路径
+                        data_path = st.text_input(
+                            "数据路径",
+                            value="",
+                            help="JSON响应中的数据路径，例如：'data.items'"
+                        )
                     
                     # 执行API请求
-                    if st.button("发送请求", use_container_width=True):
+                    if st.button("从API加载数据", use_container_width=True):
                         try:
-                            # 解析参数和头信息
-                            try:
-                                params = json.loads(params_input)
-                                headers = json.loads(headers_input)
-                            except json.JSONDecodeError as e:
-                                st.error(f"JSON解析错误: {str(e)}")
-                                params = {}
-                                headers = {"Content-Type": "application/json"}
-                            
-                            with st.spinner("正在发送API请求..."):
+                            with st.spinner("正在从API加载数据..."):
+                                # 解析参数和头信息
+                                try:
+                                    params = json.loads(params_input)
+                                    headers = json.loads(headers_input)
+                                except json.JSONDecodeError:
+                                    st.error("参数或请求头格式无效，请使用有效的JSON格式")
+                                    return
+                                
                                 # 加载数据
-                                self.df = self.data_loader.load_api(
+                                self.df = self.data_loader.load_from_api(
                                     url=api_url,
                                     params=params,
                                     headers=headers,
-                                    format=api_format.lower()
+                                    format=api_format.lower(),
+                                    data_path=data_path if data_path else None
                                 )
                                 
                                 # 显示数据信息
-                                st.success(f"成功接收API响应")
+                                st.success(f"成功从API加载数据")
                                 st.caption(f"数据大小: {self.df.shape[0]} 行 × {self.df.shape[1]} 列")
                                 
                                 # 初始化处理器和可视化器
                                 self._init_components()
                         except Exception as e:
-                            st.error(f"API请求失败: {str(e)}")
+                            st.error(f"API数据加载失败: {str(e)}")
                 
                 # 如果数据已加载，显示数据信息和导出选项
                 if self.df is not None:
@@ -300,11 +309,20 @@ class Dashboard:
                 st.error("请刷新页面并重试")
     
     def _init_components(self):
-        """初始化数据处理器和可视化器"""
+        """初始化处理器和可视化器"""
         if self.df is not None:
             self.processor = DataProcessor(self.df)
             self.visualizer = Visualizer(self.df)
             self.ml_model = None  # 重置ML模型
+    
+    def _update_data(self, new_df):
+        """更新数据并重新初始化组件
+        
+        Args:
+            new_df: 新的数据框
+        """
+        self.df = new_df
+        self._init_components()
     
     def _render_data_overview(self):
         """数据概览选项卡内容"""

@@ -16,6 +16,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import warnings
 warnings.filterwarnings('ignore')
+import streamlit as st
 
 
 class MLModel:
@@ -39,6 +40,7 @@ class MLModel:
         self.scaler = None
         self.label_encoder = None
         self.metrics = {}
+        self.model_explanations = {}
     
     def preprocess_data(self, feature_columns: Optional[List[str]] = None, test_size: float = 0.2, 
                        random_state: int = 42, scale_method: Optional[str] = None) -> None:
@@ -129,7 +131,7 @@ class MLModel:
         """训练回归模型
         
         Args:
-            model_type: 模型类型，可选'linear'、'random_forest'、'gradient_boosting'、'svr'、'knn'
+            model_type: 模型类型，可选'linear'、'random_forest'、'gradient_boosting'、'svr'、'knn'、'xgboost'、'lightgbm'
             params: 模型参数
             
         Returns:
@@ -152,6 +154,20 @@ class MLModel:
             self.model = SVR(**params)
         elif model_type == 'knn':
             self.model = KNeighborsRegressor(**params)
+        elif model_type == 'xgboost':
+            try:
+                import xgboost as xgb
+                self.model = xgb.XGBRegressor(**params)
+            except ImportError:
+                st.warning("XGBoost未安装，请使用pip install xgboost安装")
+                self.model = GradientBoostingRegressor(**params)
+        elif model_type == 'lightgbm':
+            try:
+                import lightgbm as lgb
+                self.model = lgb.LGBMRegressor(**params)
+            except ImportError:
+                st.warning("LightGBM未安装，请使用pip install lightgbm安装")
+                self.model = GradientBoostingRegressor(**params)
         else:
             raise ValueError(f"不支持的回归模型类型: {model_type}")
         
@@ -193,7 +209,7 @@ class MLModel:
         """训练分类模型
         
         Args:
-            model_type: 模型类型，可选'logistic'、'random_forest'、'gradient_boosting'、'svc'、'knn'
+            model_type: 模型类型，可选'logistic'、'random_forest'、'gradient_boosting'、'svc'、'knn'、'xgboost'、'lightgbm'
             params: 模型参数
             
         Returns:
@@ -216,6 +232,20 @@ class MLModel:
             self.model = SVC(**params, probability=True)
         elif model_type == 'knn':
             self.model = KNeighborsClassifier(**params)
+        elif model_type == 'xgboost':
+            try:
+                import xgboost as xgb
+                self.model = xgb.XGBClassifier(**params)
+            except ImportError:
+                st.warning("XGBoost未安装，请使用pip install xgboost安装")
+                self.model = GradientBoostingClassifier(**params)
+        elif model_type == 'lightgbm':
+            try:
+                import lightgbm as lgb
+                self.model = lgb.LGBMClassifier(**params)
+            except ImportError:
+                st.warning("LightGBM未安装，请使用pip install lightgbm安装")
+                self.model = GradientBoostingClassifier(**params)
         else:
             raise ValueError(f"不支持的分类模型类型: {model_type}")
         
@@ -255,44 +285,155 @@ class MLModel:
         
         return self.metrics
     
+    @st.cache_data(ttl=3600)
+    def get_model_explanations(self):
+        """获取模型解释
+        
+        Returns:
+            模型解释结果
+        """
+        if self.model is None:
+            return {"error": "模型尚未训练"}
+        
+        explanations = {}
+        
+        # 特征重要性
+        if hasattr(self.model, 'feature_importances_'):
+            explanations["feature_importances"] = dict(zip(self.feature_columns, self.model.feature_importances_))
+        
+        # 模型系数（线性模型）
+        if hasattr(self.model, 'coef_'):
+            if self.model.coef_.ndim == 1:
+                explanations["coefficients"] = dict(zip(self.feature_columns, self.model.coef_))
+            else:
+                # 多分类情况
+                coef_dict = {}
+                for i, class_coef in enumerate(self.model.coef_):
+                    coef_dict[f"类别_{i}"] = dict(zip(self.feature_columns, class_coef))
+                explanations["coefficients"] = coef_dict
+        
+        # 保存解释结果
+        self.model_explanations = explanations
+        return explanations
+    
+    def generate_shap_explanation(self, sample_size=100):
+        """生成SHAP值解释
+        
+        Args:
+            sample_size: 用于解释的样本量
+            
+        Returns:
+            SHAP解释器对象
+        """
+        try:
+            import shap
+            
+            # 准备数据
+            if isinstance(self.X_test, np.ndarray):
+                X_sample = self.X_test[:sample_size]
+            else:
+                X_sample = self.X_test.iloc[:sample_size]
+            
+            # 创建解释器
+            if hasattr(self.model, 'predict_proba'):
+                explainer = shap.Explainer(self.model, X_sample)
+            else:
+                explainer = shap.Explainer(self.model, X_sample)
+            
+            # 计算SHAP值
+            shap_values = explainer(X_sample)
+            
+            # 保存解释
+            self.model_explanations["shap_values"] = {
+                "explainer": explainer,
+                "values": shap_values,
+                "data": X_sample
+            }
+            
+            return self.model_explanations["shap_values"]
+            
+        except ImportError:
+            st.warning("需要安装SHAP库才能使用此功能。请运行 'pip install shap' 安装。")
+            return None
+        except Exception as e:
+            st.error(f"生成SHAP解释时出错: {str(e)}")
+            return None
+    
     def auto_train(self) -> Dict[str, Any]:
-        """自动选择并训练模型
+        """自动选择并训练最佳模型
         
         Returns:
             训练结果指标
         """
-        if self._is_classification():
-            # 尝试不同的分类模型
-            results = {}
-            models = ['logistic', 'random_forest', 'gradient_boosting', 'knn']
+        is_classification = self._is_classification()
+        
+        if is_classification:
+            # 分类模型
+            models = {
+                "logistic": LogisticRegression(),
+                "random_forest": RandomForestClassifier(),
+                "gradient_boosting": GradientBoostingClassifier()
+            }
             
-            for model_type in models:
-                try:
-                    result = self.train_classification_model(model_type)
-                    results[model_type] = result['accuracy']
-                except Exception as e:
-                    results[model_type] = 0
-            
-            # 选择最佳模型
-            best_model = max(results, key=results.get)
-            self.train_classification_model(best_model)
-            return self.metrics
+            # 添加高性能模型（如果可用）
+            try:
+                import xgboost as xgb
+                models["xgboost"] = xgb.XGBClassifier()
+            except ImportError:
+                pass
+                
+            try:
+                import lightgbm as lgb
+                models["lightgbm"] = lgb.LGBMClassifier()
+            except ImportError:
+                pass
+                
         else:
-            # 尝试不同的回归模型
-            results = {}
-            models = ['linear', 'random_forest', 'gradient_boosting', 'knn']
+            # 回归模型
+            models = {
+                "linear": LinearRegression(),
+                "random_forest": RandomForestRegressor(),
+                "gradient_boosting": GradientBoostingRegressor()
+            }
             
-            for model_type in models:
-                try:
-                    result = self.train_regression_model(model_type)
-                    results[model_type] = result['r2']
-                except Exception as e:
-                    results[model_type] = 0
+            # 添加高性能模型（如果可用）
+            try:
+                import xgboost as xgb
+                models["xgboost"] = xgb.XGBRegressor()
+            except ImportError:
+                pass
+                
+            try:
+                import lightgbm as lgb
+                models["lightgbm"] = lgb.LGBMRegressor()
+            except ImportError:
+                pass
+        
+        # 训练和评估每个模型
+        best_score = -np.inf if is_classification else np.inf
+        best_model_name = None
+        
+        for name, model in models.items():
+            # 训练模型
+            model.fit(self.X_train, self.y_train)
             
-            # 选择最佳模型
-            best_model = max(results, key=results.get)
-            self.train_regression_model(best_model)
-            return self.metrics
+            # 评估模型
+            if is_classification:
+                score = accuracy_score(self.y_test, model.predict(self.X_test))
+                if score > best_score:
+                    best_score = score
+                    best_model_name = name
+            else:
+                score = mean_squared_error(self.y_test, model.predict(self.X_test))
+                if score < best_score:
+                    best_score = score
+                    best_model_name = name
+        
+        # 使用最佳模型训练
+        if is_classification:
+            return self.train_classification_model(best_model_name)
+        else:
+            return self.train_regression_model(best_model_name)
     
     def predict(self, data: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """使用训练好的模型进行预测

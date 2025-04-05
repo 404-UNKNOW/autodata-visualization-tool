@@ -1,4 +1,4 @@
-# 自动化数据可视化工具
+# autodata-visualization-tool
 
 这是一个强大的自动化数据可视化和分析工具，可以帮助用户快速导入、处理、可视化数据，并进行机器学习分析。
 
@@ -18,8 +18,8 @@
 
 1. 克隆仓库:
 ```bash
-git clone https://github.com/你的用户名/自动化数据可视化工具.git
-cd 自动化数据可视化工具
+git clone https://github.com/你的用户名/autodata-visualization-tool.git
+cd autodata-visualization-tool
 ```
 
 2. 安装依赖:
@@ -75,4 +75,4 @@ streamlit run app.py
 
 ## 贡献指南
 
-欢迎贡献代码、报告问题或提出新功能建议。请通过GitHub Issues或Pull Requests参与项目开发。 
+欢迎贡献代码、报告问题或提出新功能建议。请通过GitHub Issues或Pull Requests参与项目开发。

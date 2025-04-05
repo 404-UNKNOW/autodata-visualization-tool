@@ -526,15 +526,12 @@ class MLModel:
         return fig
     
     def plot_confusion_matrix(self) -> Optional[go.Figure]:
-        """可视化混淆矩阵
+        """绘制混淆矩阵
         
         Returns:
-            plotly图形对象或None(如果不是分类问题)
+            go.Figure: 混淆矩阵图
         """
-        if self.model is None or not self._is_classification():
-            return None
-        
-        if 'confusion_matrix' not in self.metrics:
+        if 'confusion_matrix' not in self.metrics or self.metrics['confusion_matrix'] is None:
             return None
         
         conf_matrix = self.metrics['confusion_matrix']
@@ -542,31 +539,48 @@ class MLModel:
         # 获取标签
         if self.label_encoder is not None and hasattr(self.label_encoder, 'classes_'):
             labels = self.label_encoder.classes_
+            # 确保标签长度与混淆矩阵的维度一致
+            if len(labels) != conf_matrix.shape[0]:
+                labels = [str(i) for i in range(conf_matrix.shape[0])]
         else:
             labels = [str(i) for i in range(conf_matrix.shape[0])]
         
         # 创建热力图
-        fig = px.imshow(
-            conf_matrix,
-            labels=dict(x="预测类别", y="真实类别", color="数量"),
-            x=labels,
-            y=labels,
-            color_continuous_scale='Blues',
-            title='混淆矩阵'
-        )
-        
-        # 在每个单元格上显示数值
-        annotations = []
-        for i in range(conf_matrix.shape[0]):
-            for j in range(conf_matrix.shape[1]):
-                annotations.append(dict(
-                    x=labels[j],
-                    y=labels[i],
-                    text=str(conf_matrix[i, j]),
-                    showarrow=False,
-                    font=dict(color='white' if conf_matrix[i, j] > conf_matrix.max() / 2 else 'black')
-                ))
-        
-        fig.update_layout(annotations=annotations)
-        
-        return fig 
+        try:
+            fig = px.imshow(
+                conf_matrix,
+                labels=dict(x="预测类别", y="真实类别", color="数量"),
+                x=labels,
+                y=labels,
+                color_continuous_scale='Blues',
+                title='混淆矩阵'
+            )
+            
+            # 在每个单元格上显示数值
+            annotations = []
+            for i in range(conf_matrix.shape[0]):
+                for j in range(conf_matrix.shape[1]):
+                    annotations.append(dict(
+                        x=j,  # 使用索引而不是标签文本
+                        y=i,  # 使用索引而不是标签文本
+                        text=str(conf_matrix[i, j]),
+                        showarrow=False,
+                        font=dict(color='white' if conf_matrix[i, j] > conf_matrix.max() / 2 else 'black')
+                    ))
+            
+            fig.update_layout(annotations=annotations)
+            
+            return fig
+        except ValueError as e:
+            print(f"创建混淆矩阵图时出错: {str(e)}")
+            print(f"混淆矩阵形状: {conf_matrix.shape}，标签长度: {len(labels)}")
+            
+            # 使用更简单的备选方案 - 直接绘制无标签的热力图
+            fig = px.imshow(
+                conf_matrix,
+                labels=dict(x="预测类别", y="真实类别", color="数量"),
+                color_continuous_scale='Blues',
+                title='混淆矩阵'
+            )
+            
+            return fig 

@@ -1,13 +1,16 @@
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import json
 import numpy as np
+import os
+import sqlite3
 
 from src.data_processor import DataProcessor
 from src.visualizer import Visualizer
 from src.ml_model import MLModel  # 导入新增的机器学习模块
+from src.data_loader import DataLoader  # 导入数据加载器
 
 
 class Dashboard:
@@ -27,7 +30,7 @@ class Dashboard:
     
     def run(self):
         """运行Streamlit应用"""
-        st.set_page_config(page_title=self.title, page_icon="📊", layout="wide")
+        # 页面配置已在app.py中设置，此处不再重复设置
         
         st.title(self.title)
         st.write("欢迎使用自动化数据可视化工具！上传您的数据集并探索洞察。")
@@ -65,44 +68,243 @@ class Dashboard:
         with st.sidebar:
             st.header("数据加载")
             
-            # 文件上传
-            uploaded_file = st.file_uploader("上传数据文件", type=["csv", "xlsx", "xls", "json"])
+            # 创建数据加载器对象（如果还没有）
+            if not hasattr(self, 'data_loader'):
+                self.data_loader = DataLoader()
             
-            if uploaded_file is not None:
-                try:
-                    # 根据文件类型加载数据
-                    file_type = uploaded_file.name.split(".")[-1].lower()
-                    
-                    if file_type == "csv":
-                        self.df = pd.read_csv(uploaded_file)
-                    elif file_type in ["xlsx", "xls"]:
-                        self.df = pd.read_excel(uploaded_file)
-                    elif file_type == "json":
-                        self.df = pd.read_json(uploaded_file)
-                    
-                    # 初始化处理器和可视化器
-                    self.processor = DataProcessor(self.df)
-                    self.visualizer = Visualizer(self.df)
-                    
-                    st.success(f"成功加载数据: {uploaded_file.name}")
-                    st.write(f"数据大小: {self.df.shape[0]} 行 × {self.df.shape[1]} 列")
-                except Exception as e:
-                    st.error(f"加载数据时出错: {str(e)}")
+            # 数据源选择
+            data_source = st.radio(
+                "选择数据来源",
+                ["文件上传", "示例数据", "数据库", "API"],
+                captions=["上传本地CSV/Excel/JSON文件", "生成测试数据", "从SQLite数据库加载", "从REST API加载"]
+            )
             
-            # 使用示例数据的选项
-            if st.button("加载示例数据"):
-                # 加载示例数据
-                try:
-                    import seaborn as sns
-                    self.df = sns.load_dataset("tips")
+            try:
+                # 1. 文件上传
+                if data_source == "文件上传":
+                    # 文件上传
+                    uploaded_file = st.file_uploader(
+                        "上传数据文件", 
+                        type=["csv", "xlsx", "xls", "json"],
+                        help="支持CSV、Excel和JSON格式"
+                    )
                     
-                    # 初始化处理器和可视化器
-                    self.processor = DataProcessor(self.df)
-                    self.visualizer = Visualizer(self.df)
+                    if uploaded_file is not None:
+                        try:
+                            with st.spinner("正在加载数据..."):
+                                # 加载数据
+                                self.df = self.data_loader.load_file(uploaded_file)
+                                
+                                # 显示数据信息
+                                st.success(f"成功加载: {uploaded_file.name}")
+                                st.caption(f"数据大小: {self.df.shape[0]} 行 × {self.df.shape[1]} 列")
+                                
+                                # 初始化处理器和可视化器
+                                self._init_components()
+                        except Exception as e:
+                            st.error(f"加载数据失败: {str(e)}")
+                
+                # 2. 示例数据
+                elif data_source == "示例数据":
+                    data_type = st.selectbox(
+                        "示例数据类型",
+                        ["销售数据", "股票数据", "问卷调查数据"],
+                        format_func=lambda x: x
+                    )
                     
-                    st.success("成功加载示例数据 (tips)")
-                except Exception as e:
-                    st.error(f"加载示例数据时出错: {str(e)}")
+                    rows = st.slider("样本数量", 20, 500, 100)
+                    
+                    # 映射中文类型到英文
+                    data_type_map = {
+                        "销售数据": "sales",
+                        "股票数据": "stock",
+                        "问卷调查数据": "survey"
+                    }
+                    
+                    if st.button("加载示例数据", use_container_width=True):
+                        try:
+                            with st.spinner("正在生成示例数据..."):
+                                # 加载示例数据
+                                self.df = self.data_loader.generate_sample_data(
+                                    data_type=data_type_map[data_type],
+                                    rows=rows
+                                )
+                                
+                                # 显示数据信息
+                                st.success(f"成功加载{data_type}示例数据")
+                                st.caption(f"数据大小: {self.df.shape[0]} 行 × {self.df.shape[1]} 列")
+                                
+                                # 初始化处理器和可视化器
+                                self._init_components()
+                        except Exception as e:
+                            st.error(f"生成示例数据失败: {str(e)}")
+                
+                # 3. 数据库
+                elif data_source == "数据库":
+                    # 使用文件上传或本地路径
+                    database_option = st.radio(
+                        "数据库选择方式",
+                        ["上传数据库文件", "使用示例数据库"],
+                        captions=["上传SQLite数据库文件", "使用示例销售数据库"]
+                    )
+                    
+                    if database_option == "上传数据库文件":
+                        db_file = st.file_uploader("上传SQLite数据库文件", type=["db", "sqlite", "sqlite3"])
+                        
+                        if db_file is not None:
+                            # 保存上传的数据库文件到临时位置
+                            db_path = f"temp_{db_file.name}"
+                            with open(db_path, "wb") as f:
+                                f.write(db_file.getbuffer())
+                            st.success(f"成功上传数据库文件: {db_file.name}")
+                        else:
+                            db_path = None
+                    else:
+                        # 使用示例数据库
+                        db_path = "examples/sample_database.db"
+                        
+                        # 如果示例数据库不存在，显示提示
+                        if not os.path.exists(db_path):
+                            st.warning("示例数据库未找到，请先创建示例数据库或上传自己的数据库文件。")
+                    
+                    # 如果数据库路径有效，允许输入查询
+                    if db_path and os.path.exists(db_path):
+                        # 显示可用的表
+                        try:
+                            conn = sqlite3.connect(db_path)
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                            tables = cursor.fetchall()
+                            table_names = [table[0] for table in tables]
+                            conn.close()
+                            
+                            if table_names:
+                                st.success(f"数据库包含以下表: {', '.join(table_names)}")
+                                
+                                # 选择表
+                                selected_table = st.selectbox("选择数据表", table_names)
+                                
+                                # 生成查询
+                                st.subheader("SQL查询")
+                                use_custom_query = st.checkbox("使用自定义SQL查询")
+                                
+                                if use_custom_query:
+                                    query = st.text_area(
+                                        "输入SQL查询", 
+                                        value=f"SELECT * FROM {selected_table} LIMIT 100;"
+                                    )
+                                else:
+                                    query = f"SELECT * FROM {selected_table} LIMIT 100;"
+                                    st.code(query)
+                                
+                                # 执行查询
+                                if st.button("执行查询", use_container_width=True):
+                                    try:
+                                        with st.spinner("正在执行查询..."):
+                                            # 加载数据
+                                            self.df = self.data_loader.load_database(db_path, query)
+                                            
+                                            # 显示数据信息
+                                            st.success(f"成功执行查询")
+                                            st.caption(f"查询结果: {self.df.shape[0]} 行 × {self.df.shape[1]} 列")
+                                            
+                                            # 初始化处理器和可视化器
+                                            self._init_components()
+                                    except Exception as e:
+                                        st.error(f"查询执行失败: {str(e)}")
+                            else:
+                                st.warning("数据库中没有表")
+                        except Exception as e:
+                            st.error(f"读取数据库表失败: {str(e)}")
+                
+                # 4. API
+                elif data_source == "API":
+                    # API配置
+                    api_url = st.text_input(
+                        "API URL",
+                        value="https://jsonplaceholder.typicode.com/users",
+                        help="输入API端点URL"
+                    )
+                    
+                    # 响应格式
+                    api_format = st.selectbox(
+                        "响应格式",
+                        ["JSON", "CSV"],
+                        help="选择API响应的数据格式"
+                    )
+                    
+                    # 高级选项
+                    with st.expander("高级选项"):
+                        # 参数
+                        params_input = st.text_area(
+                            "请求参数 (JSON格式)",
+                            value="{}",
+                            help="输入请求参数，JSON格式"
+                        )
+                        
+                        # 头信息
+                        headers_input = st.text_area(
+                            "请求头 (JSON格式)",
+                            value='{"Content-Type": "application/json"}',
+                            help="输入请求头，JSON格式"
+                        )
+                    
+                    # 执行API请求
+                    if st.button("发送请求", use_container_width=True):
+                        try:
+                            # 解析参数和头信息
+                            try:
+                                params = json.loads(params_input)
+                                headers = json.loads(headers_input)
+                            except json.JSONDecodeError as e:
+                                st.error(f"JSON解析错误: {str(e)}")
+                                params = {}
+                                headers = {"Content-Type": "application/json"}
+                            
+                            with st.spinner("正在发送API请求..."):
+                                # 加载数据
+                                self.df = self.data_loader.load_api(
+                                    url=api_url,
+                                    params=params,
+                                    headers=headers,
+                                    format=api_format.lower()
+                                )
+                                
+                                # 显示数据信息
+                                st.success(f"成功接收API响应")
+                                st.caption(f"数据大小: {self.df.shape[0]} 行 × {self.df.shape[1]} 列")
+                                
+                                # 初始化处理器和可视化器
+                                self._init_components()
+                        except Exception as e:
+                            st.error(f"API请求失败: {str(e)}")
+                
+                # 如果数据已加载，显示数据信息和导出选项
+                if self.df is not None:
+                    st.divider()
+                    
+                    # 显示数据信息
+                    with st.expander("数据信息", expanded=True):
+                        info = self.data_loader.get_data_info()
+                        for key, value in info.items():
+                            if key not in ["状态", "数据源"]:
+                                st.caption(f"{key}: {value}")
+                    
+                    # 导出选项
+                    export_format = st.selectbox("导出格式", ["CSV", "Excel", "JSON"])
+                    export_html = self.data_loader.create_download_link(export_format.lower())
+                    st.markdown(export_html, unsafe_allow_html=True)
+                
+            except Exception as e:
+                st.error(f"出现未知错误: {str(e)}")
+                st.error("请刷新页面并重试")
+    
+    def _init_components(self):
+        """初始化数据处理器和可视化器"""
+        if self.df is not None:
+            self.processor = DataProcessor(self.df)
+            self.visualizer = Visualizer(self.df)
+            self.ml_model = None  # 重置ML模型
     
     def _render_data_overview(self):
         """数据概览选项卡内容"""
@@ -120,13 +322,14 @@ class Dashboard:
         
         # 列信息
         st.subheader("列信息")
+        # 修复PyArrow兼容性问题：将dtypes转换为字符串而不是对象
         col_info = pd.DataFrame({
-            "数据类型": self.df.dtypes,
-            "非空值数": self.df.count(),
-            "缺失值数": self.df.isnull().sum(),
-            "缺失值百分比": (self.df.isnull().sum() / len(self.df) * 100).round(2),
+            "数据类型": [str(dtype) for dtype in self.df.dtypes.values],
+            "非空值数": self.df.count().values,
+            "缺失值数": self.df.isnull().sum().values,
+            "缺失值百分比": (self.df.isnull().sum() / len(self.df) * 100).round(2).values,
             "唯一值数": [self.df[col].nunique() for col in self.df.columns],
-        })
+        }, index=self.df.columns)
         st.dataframe(col_info, use_container_width=True)
         
         # 数值型数据统计
@@ -141,9 +344,25 @@ class Dashboard:
         st.subheader("分类型列概览")
         categorical_df = self.df.select_dtypes(include=["object", "category"])
         if not categorical_df.empty:
-            for col in categorical_df.columns:
-                st.write(f"**{col}** (Top 10)")
-                st.dataframe(self.df[col].value_counts().head(10).reset_index(), use_container_width=True)
+            for col in categorical_df.columns[:5]:  # 限制只显示前5个分类列，避免界面过长
+                with st.expander(f"**{col}** (唯一值: {categorical_df[col].nunique()})"):
+                    value_counts = self.df[col].value_counts().head(10).reset_index()
+                    value_counts.columns = [col, '计数']
+                    st.dataframe(value_counts, use_container_width=True)
+                    
+                    # 如果唯一值不超过10个，显示饼图
+                    if categorical_df[col].nunique() <= 10:
+                        fig = px.pie(value_counts, names=col, values='计数', title=f"{col}分布")
+                        st.plotly_chart(fig, use_container_width=True)
+            
+            # 如果有更多分类列，显示查看更多的选项
+            if len(categorical_df.columns) > 5:
+                with st.expander(f"查看更多分类列 (共{len(categorical_df.columns)}个)"):
+                    for col in categorical_df.columns[5:]:
+                        st.write(f"**{col}** (唯一值: {categorical_df[col].nunique()})")
+                        value_counts = self.df[col].value_counts().head(10).reset_index()
+                        value_counts.columns = [col, '计数']
+                        st.dataframe(value_counts, use_container_width=True)
         else:
             st.info("没有分类型列")
     
@@ -218,447 +437,745 @@ class Dashboard:
         """数据可视化选项卡内容"""
         st.header("数据可视化")
         
-        # 图表类型选择
-        chart_type = st.selectbox(
-            "选择图表类型",
-            ["散点图", "条形图", "折线图", "饼图", "直方图", "箱线图", "相关系数热力图", "成对关系图"]
-        )
+        if self.df is None:
+            st.warning("请先加载数据")
+            return
         
-        # 根据图表类型提供不同的选项
-        if chart_type == "散点图":
-            x_col = st.selectbox("X轴", self.df.select_dtypes(include=["int64", "float64"]).columns)
-            y_col = st.selectbox("Y轴", self.df.select_dtypes(include=["int64", "float64"]).columns, 
-                                index=min(1, len(self.df.select_dtypes(include=["int64", "float64"]).columns)-1))
+        # 获取数据列
+        numerical_cols = self.visualizer.get_numerical_columns()
+        categorical_cols = self.visualizer.get_categorical_columns()
+        datetime_cols = self.visualizer.get_datetime_columns()
+        
+        # 智能图表推荐
+        with st.expander("✨ 智能图表推荐", expanded=True):
+            st.info("根据数据特点，系统可以为您推荐以下可视化方式：")
             
-            cat_cols = list(self.df.select_dtypes(include=["object", "category"]).columns)
-            color_col = st.selectbox("颜色分组 (可选)", ["None"] + cat_cols) if cat_cols else "None"
-            color_col = None if color_col == "None" else color_col
+            recommendations = self._generate_visualization_recommendations()
             
-            if st.button("生成散点图"):
-                fig = self.visualizer.plotly_scatter(x_col, y_col, color_col)
-                st.plotly_chart(fig, use_container_width=True)
-                
-        elif chart_type == "条形图":
-            cat_cols = list(self.df.select_dtypes(include=["object", "category"]).columns)
-            num_cols = list(self.df.select_dtypes(include=["int64", "float64"]).columns)
-            
-            x_col = st.selectbox("X轴 (分类变量)", cat_cols if cat_cols else self.df.columns)
-            y_col = st.selectbox("Y轴 (数值变量，可选)", ["计数"] + num_cols)
-            y_col = None if y_col == "计数" else y_col
-            
-            if st.button("生成条形图"):
-                fig = self.visualizer.plotly_bar(x_col, y_col)
-                st.plotly_chart(fig, use_container_width=True)
-                
-        elif chart_type == "折线图":
-            x_col = st.selectbox("X轴", self.df.columns)
-            y_col = st.selectbox("Y轴", self.df.select_dtypes(include=["int64", "float64"]).columns)
-            
-            cat_cols = list(self.df.select_dtypes(include=["object", "category"]).columns)
-            color_col = st.selectbox("颜色分组 (可选)", ["None"] + cat_cols) if cat_cols else "None"
-            color_col = None if color_col == "None" else color_col
-            
-            if st.button("生成折线图"):
-                fig = self.visualizer.plotly_line(x_col, y_col, color_col)
-                st.plotly_chart(fig, use_container_width=True)
-                
-        elif chart_type == "饼图":
-            cat_cols = list(self.df.select_dtypes(include=["object", "category"]).columns)
-            if cat_cols:
-                col = st.selectbox("选择变量", cat_cols)
-                if st.button("生成饼图"):
-                    fig = self.visualizer.plotly_pie(col)
-                    st.plotly_chart(fig, use_container_width=True)
+            if recommendations:
+                for i, (rec_title, rec_type, rec_params) in enumerate(recommendations):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.subheader(f"{i+1}. {rec_title}")
+                    with col2:
+                        if st.button("生成图表", key=f"rec_btn_{i}"):
+                            try:
+                                fig = self.visualizer.create_interactive_chart(rec_type, **rec_params)
+                                st.plotly_chart(fig, use_container_width=True)
+                            except Exception as e:
+                                st.error(f"图表生成失败: {str(e)}")
             else:
-                st.warning("未发现适合饼图的分类变量")
+                st.warning("暂无可推荐的图表，请尝试手动选择图表类型。")
+        
+        # 选择图表类型
+        chart_types = {
+            "条形图": "bar",
+            "折线图": "line",
+            "散点图": "scatter",
+            "饼图": "pie",
+            "热力图": "heatmap",
+            "箱线图": "box",
+            "直方图": "histogram",
+            "气泡图": "bubble",
+            "时间序列": "time_series",
+            "地理地图": "geo_map"
+        }
+        
+        chart_type = st.selectbox("选择图表类型", list(chart_types.keys()))
+        
+        # 根据图表类型显示不同的参数选择
+        chart_id = chart_types[chart_type]
+        
+        with st.form(key="visualization_form"):
+            if chart_id == "bar":
+                title = st.text_input("图表标题", "条形图")
+                col1, col2 = st.columns(2)
+                with col1:
+                    x = st.selectbox("X轴(分类)", categorical_cols)
+                with col2:
+                    y = st.selectbox("Y轴(数值)", numerical_cols)
+                color = st.selectbox("颜色分组(可选)", ["无"] + categorical_cols)
+                orientation = st.radio("方向", ["垂直", "水平"], horizontal=True)
+                sort_values = st.checkbox("按值排序")
                 
-        elif chart_type == "直方图":
-            num_cols = list(self.df.select_dtypes(include=["int64", "float64"]).columns)
-            if num_cols:
-                col = st.selectbox("选择变量", num_cols)
-                bins = st.slider("分箱数量", 5, 100, 30)
-                kde = st.checkbox("显示密度曲线", True)
+                if st.form_submit_button("生成图表"):
+                    try:
+                        fig = self.visualizer.create_bar_chart(
+                            x=x, 
+                            y=y, 
+                            title=title,
+                            color=None if color == "无" else color,
+                            orientation='v' if orientation == "垂直" else 'h',
+                            sort_values=sort_values
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "line":
+                title = st.text_input("图表标题", "折线图")
+                col1, col2 = st.columns(2)
+                with col1:
+                    x = st.selectbox("X轴", datetime_cols + numerical_cols)
+                with col2:
+                    # 可以选择多个Y轴
+                    y_options = numerical_cols
+                    y = st.multiselect("Y轴(可多选)", y_options, default=[y_options[0]] if y_options else [])
                 
-                if st.button("生成直方图"):
-                    fig = self.visualizer.distribution_plot(col, bins, kde)
-                    st.pyplot(fig)
-            else:
-                st.warning("未发现适合直方图的数值变量")
+                color = st.selectbox("颜色分组(可选)", ["无"] + categorical_cols)
+                mode = st.radio("显示模式", ["线+点", "仅线条", "仅点"], horizontal=True)
                 
-        elif chart_type == "箱线图":
-            num_cols = list(self.df.select_dtypes(include=["int64", "float64"]).columns)
-            if num_cols:
-                col = st.selectbox("选择数值变量", num_cols)
+                mode_map = {"线+点": "lines+markers", "仅线条": "lines", "仅点": "markers"}
                 
-                cat_cols = list(self.df.select_dtypes(include=["object", "category"]).columns)
-                group_col = st.selectbox("分组变量 (可选)", ["None"] + cat_cols) if cat_cols else "None"
-                group_col = None if group_col == "None" else group_col
+                if st.form_submit_button("生成图表"):
+                    try:
+                        if len(y) == 1:
+                            y = y[0]  # 单个Y轴
+                            
+                        fig = self.visualizer.create_line_chart(
+                            x=x, 
+                            y=y, 
+                            title=title,
+                            color=None if color == "无" else color,
+                            mode=mode_map[mode]
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "scatter":
+                title = st.text_input("图表标题", "散点图")
+                col1, col2 = st.columns(2)
+                with col1:
+                    x = st.selectbox("X轴", numerical_cols)
+                with col2:
+                    y = st.selectbox("Y轴", numerical_cols)
                 
-                if st.button("生成箱线图"):
-                    fig = self.visualizer.boxplot(col, group_col)
-                    st.pyplot(fig)
-            else:
-                st.warning("未发现适合箱线图的数值变量")
+                col1, col2 = st.columns(2)
+                with col1:
+                    color = st.selectbox("颜色分组(可选)", ["无"] + categorical_cols)
+                with col2:
+                    size = st.selectbox("点大小(可选)", ["无"] + numerical_cols)
                 
-        elif chart_type == "相关系数热力图":
-            num_cols = list(self.df.select_dtypes(include=["int64", "float64"]).columns)
-            if len(num_cols) > 1:
-                selected_cols = st.multiselect("选择变量 (默认全选)", num_cols, default=num_cols)
+                add_trend = st.checkbox("添加趋势线")
                 
-                if st.button("生成相关系数热力图") and selected_cols:
-                    fig = self.visualizer.correlation_heatmap(selected_cols)
-                    st.pyplot(fig)
-            else:
-                st.warning("至少需要两个数值变量来计算相关系数")
+                if st.form_submit_button("生成图表"):
+                    try:
+                        fig = self.visualizer.create_scatter_chart(
+                            x=x, 
+                            y=y, 
+                            title=title,
+                            color=None if color == "无" else color,
+                            size=None if size == "无" else size,
+                            add_trend=add_trend
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "pie":
+                title = st.text_input("图表标题", "饼图")
+                col1, col2 = st.columns(2)
+                with col1:
+                    names = st.selectbox("分类", categorical_cols)
+                with col2:
+                    values = st.selectbox("数值", ["计数"] + numerical_cols)
                 
-        elif chart_type == "成对关系图":
-            num_cols = list(self.df.select_dtypes(include=["int64", "float64"]).columns)
-            if len(num_cols) > 1:
-                max_cols = min(5, len(num_cols))
-                selected_cols = st.multiselect("选择变量 (建议选择2-5个)", num_cols, 
-                                             default=num_cols[:max_cols])
+                hole = st.slider("中心孔径(0为饼图，>0为环形图)", 0.0, 0.8, 0.0, 0.1)
                 
-                cat_cols = list(self.df.select_dtypes(include=["object", "category"]).columns)
-                hue_col = st.selectbox("颜色分组 (可选)", ["None"] + cat_cols) if cat_cols else "None"
-                hue_col = None if hue_col == "None" else hue_col
+                if st.form_submit_button("生成图表"):
+                    try:
+                        if values == "计数":
+                            # 使用分类计数
+                            value_counts = self.df[names].value_counts().reset_index()
+                            value_counts.columns = [names, 'count']
+                            fig = px.pie(
+                                value_counts, 
+                                names=names, 
+                                values='count',
+                                title=title,
+                                hole=hole
+                            )
+                        else:
+                            fig = self.visualizer.create_pie_chart(
+                                names=names, 
+                                values=values, 
+                                title=title,
+                                hole=hole
+                            )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "heatmap":
+                title = st.text_input("图表标题", "相关性热力图")
                 
-                if st.button("生成成对关系图") and len(selected_cols) >= 2:
-                    with st.spinner("正在生成成对关系图，这可能需要一些时间..."):
-                        fig = self.visualizer.pair_plot(selected_cols, hue_col)
-                        st.pyplot(fig)
-            else:
-                st.warning("至少需要两个数值变量来创建成对关系图")
+                # 选择要包含在热力图中的列
+                heatmap_cols = st.multiselect(
+                    "选择要包含的数值列", 
+                    numerical_cols,
+                    default=numerical_cols[:min(len(numerical_cols), 8)]  # 默认选择前8个
+                )
+                
+                if st.form_submit_button("生成图表"):
+                    try:
+                        if len(heatmap_cols) < 2:
+                            st.error("热力图至少需要选择2个数值列")
+                        else:
+                            fig = self.visualizer.create_heatmap(
+                                columns=heatmap_cols,
+                                title=title
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "box":
+                title = st.text_input("图表标题", "箱线图")
+                col1, col2 = st.columns(2)
+                with col1:
+                    y = st.selectbox("数值列", numerical_cols)
+                with col2:
+                    x = st.selectbox("分组列(可选)", ["无"] + categorical_cols)
+                
+                color = st.selectbox("颜色分组(可选)", ["无"] + categorical_cols)
+                
+                if st.form_submit_button("生成图表"):
+                    try:
+                        fig = self.visualizer.create_box_plot(
+                            x=None if x == "无" else x,
+                            y=y,
+                            title=title,
+                            color=None if color == "无" else color
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "histogram":
+                title = st.text_input("图表标题", "直方图")
+                col1, col2 = st.columns(2)
+                with col1:
+                    column = st.selectbox("数值列", numerical_cols)
+                with col2:
+                    bins = st.slider("分组数量", 5, 100, 20)
+                
+                color = st.selectbox("颜色分组(可选)", ["无"] + categorical_cols)
+                cumulative = st.checkbox("显示累积分布")
+                
+                if st.form_submit_button("生成图表"):
+                    try:
+                        fig = self.visualizer.create_histogram(
+                            column=column,
+                            bins=bins,
+                            title=title,
+                            color=None if color == "无" else color,
+                            cumulative=cumulative
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "bubble":
+                title = st.text_input("图表标题", "气泡图")
+                col1, col2 = st.columns(2)
+                with col1:
+                    x = st.selectbox("X轴", numerical_cols)
+                with col2:
+                    y = st.selectbox("Y轴", numerical_cols)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    size = st.selectbox("气泡大小", numerical_cols)
+                with col2:
+                    color = st.selectbox("颜色分组(可选)", ["无"] + categorical_cols)
+                
+                if st.form_submit_button("生成图表"):
+                    try:
+                        fig = self.visualizer.create_bubble_chart(
+                            x=x,
+                            y=y,
+                            size=size,
+                            title=title,
+                            color=None if color == "无" else color
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "time_series":
+                title = st.text_input("图表标题", "时间序列图")
+                
+                if not datetime_cols:
+                    st.warning("未检测到日期时间列。您可以选择文本列，系统将尝试转换为日期格式。")
+                    date_options = self.df.select_dtypes(include=['object']).columns.tolist()
+                else:
+                    date_options = datetime_cols
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    date_column = st.selectbox("日期列", date_options)
+                with col2:
+                    value_column = st.selectbox("数值列", numerical_cols)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    color = st.selectbox("颜色分组(可选)", ["无"] + categorical_cols)
+                with col2:
+                    resample_freq = st.selectbox(
+                        "重采样频率(可选)",
+                        ["无", "日(D)", "周(W)", "月(M)", "季度(Q)", "年(Y)"]
+                    )
+                    freq_map = {"无": None, "日(D)": "D", "周(W)": "W", "月(M)": "M", "季度(Q)": "Q", "年(Y)": "Y"}
+                
+                if st.form_submit_button("生成图表"):
+                    try:
+                        fig = self.visualizer.create_time_series(
+                            date_column=date_column,
+                            value_column=value_column,
+                            title=title,
+                            freq=freq_map[resample_freq],
+                            color=None if color == "无" else color
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+            
+            elif chart_id == "geo_map":
+                title = st.text_input("图表标题", "地理地图")
+                
+                # 查找可能的地理列
+                geo_cols = [col for col in self.df.columns if any(kw in col.lower() for kw in 
+                                                       ['country', 'region', 'location', 'state', 'province', 'city', 
+                                                        '国家', '地区', '省', '市'])]
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    location_column = st.selectbox("地区/国家列", geo_cols if geo_cols else categorical_cols)
+                with col2:
+                    value_column = st.selectbox("数值列(可选)", ["计数"] + numerical_cols)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    scope = st.selectbox("地图范围", ["世界", "亚洲", "欧洲", "北美", "南美", "非洲", "中国"])
+                    scope_map = {
+                        "世界": "world", "亚洲": "asia", "欧洲": "europe", 
+                        "北美": "north america", "南美": "south america", 
+                        "非洲": "africa", "中国": "china"
+                    }
+                with col2:
+                    color_scale = st.selectbox(
+                        "颜色比例尺", 
+                        ["Viridis", "Plasma", "Inferno", "Magma", "Cividis", "Turbo", 
+                         "Blues", "Greens", "Reds", "YlOrRd", "RdBu", "Spectral"]
+                    )
+                
+                if st.form_submit_button("生成图表"):
+                    try:
+                        fig = self.visualizer.create_geo_map(
+                            location_column=location_column,
+                            value_column=None if value_column == "计数" else value_column,
+                            title=title,
+                            scope=scope_map[scope],
+                            color_scale=color_scale
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"图表生成失败: {str(e)}")
+    
+    def _generate_visualization_recommendations(self) -> List[Tuple[str, str, Dict]]:
+        """生成可视化推荐
+        
+        Returns:
+            推荐列表，每项包含(标题, 图表类型, 参数字典)
+        """
+        if self.df is None or len(self.df) == 0:
+            return []
+        
+        recommendations = []
+        
+        try:
+            numerical_cols = self.visualizer.get_numerical_columns()
+            categorical_cols = self.visualizer.get_categorical_columns()
+            datetime_cols = self.visualizer.get_datetime_columns()
+            
+            # 1. 如果有日期列和数值列，推荐时间序列
+            if datetime_cols and numerical_cols:
+                date_col = datetime_cols[0]
+                num_col = max(numerical_cols, key=lambda x: self.df[x].notna().sum())
+                
+                recommendations.append((
+                    f"{num_col}随时间变化趋势",
+                    "time_series",
+                    {"date_column": date_col, "value_column": num_col, "title": f"{num_col}随时间变化趋势"}
+                ))
+            
+            # 2. 如果有分类列，推荐条形图展示分布
+            if categorical_cols:
+                cat_col = max(categorical_cols, key=lambda x: len(self.df[x].unique()))
+                
+                # 如果类别太多，选择前10个最多的
+                if len(self.df[cat_col].unique()) > 10:
+                    recommendations.append((
+                        f"{cat_col}的前10个类别分布",
+                        "bar",
+                        {"x": cat_col, "y": "count", "title": f"{cat_col}的前10个类别分布", "sort_values": True}
+                    ))
+                else:
+                    recommendations.append((
+                        f"{cat_col}的分布",
+                        "bar",
+                        {"x": cat_col, "y": "count", "title": f"{cat_col}的分布", "sort_values": True}
+                    ))
+            
+            # 3. 如果有2个以上数值列，推荐相关性热力图
+            if len(numerical_cols) >= 3:
+                # 选择相关性可能较高的列(尽量排除ID列)
+                non_id_cols = [col for col in numerical_cols 
+                              if not any(kw in col.lower() for kw in ['id', 'code', 'key', 'index'])]
+                
+                if len(non_id_cols) >= 3:
+                    selected_cols = non_id_cols[:min(8, len(non_id_cols))]
+                    recommendations.append((
+                        "主要数值特征相关性分析",
+                        "heatmap",
+                        {"columns": selected_cols, "title": "主要数值特征相关性分析"}
+                    ))
+            
+            # 4. 如果有分类列和数值列，推荐箱线图
+            if categorical_cols and numerical_cols:
+                cat_col = min(categorical_cols, key=lambda x: len(self.df[x].unique()))
+                num_col = max(numerical_cols, key=lambda x: self.df[x].var())
+                
+                # 确保类别数量适中
+                if 2 <= len(self.df[cat_col].unique()) <= 10:
+                    recommendations.append((
+                        f"{cat_col}分组的{num_col}箱线图分析",
+                        "box",
+                        {"x": cat_col, "y": num_col, "title": f"{cat_col}分组的{num_col}箱线图分析"}
+                    ))
+            
+            # 5. 如果有2个数值列，推荐散点图
+            if len(numerical_cols) >= 2:
+                # 选择方差较大的两列
+                cols_by_var = sorted(numerical_cols, key=lambda x: -self.df[x].var())
+                if len(cols_by_var) >= 2:
+                    x_col, y_col = cols_by_var[0], cols_by_var[1]
+                    
+                    # 如果有合适的分类变量，添加为颜色
+                    color_col = None
+                    if categorical_cols:
+                        for col in categorical_cols:
+                            if 2 <= len(self.df[col].unique()) <= 7:
+                                color_col = col
+                                break
+                    
+                    recommendations.append((
+                        f"{x_col}与{y_col}的关系分析",
+                        "scatter",
+                        {
+                            "x": x_col, 
+                            "y": y_col, 
+                            "title": f"{x_col}与{y_col}的关系分析",
+                            "color": color_col,
+                            "add_trend": True
+                        }
+                    ))
+            
+            # 6. 如果有数值列，推荐直方图
+            if numerical_cols:
+                # 选择分布较宽的列
+                num_col = max(numerical_cols, key=lambda x: self.df[x].std())
+                recommendations.append((
+                    f"{num_col}的分布",
+                    "histogram",
+                    {"column": num_col, "bins": 20, "title": f"{num_col}的分布"}
+                ))
+            
+            # 7. 如果有地理相关列，推荐地图
+            geo_cols = [col for col in self.df.columns if any(kw in col.lower() for kw in 
+                                                  ['country', 'region', 'location', 'state', 'province', 
+                                                   '国家', '地区', '省', '市'])]
+            if geo_cols and numerical_cols:
+                geo_col = geo_cols[0]
+                num_col = numerical_cols[0]
+                recommendations.append((
+                    f"{geo_col}的{num_col}地理分布",
+                    "geo_map",
+                    {"location_column": geo_col, "value_column": num_col, 
+                     "title": f"{geo_col}的{num_col}地理分布", "scope": "world"}
+                ))
+        
+        except Exception as e:
+            # 异常处理，确保推荐生成不会导致整个应用崩溃
+            print(f"生成可视化推荐时出错: {str(e)}")
+        
+        return recommendations
     
     def _render_machine_learning(self):
         """机器学习选项卡内容"""
-        st.header("机器学习分析")
+        st.header("机器学习")
         
-        # 显示警告，如果数据量太小
-        if len(self.df) < 20:
-            st.warning(f"当前数据集仅包含 {len(self.df)} 条记录，这对机器学习模型来说样本量偏小。建议增加样本量以获得更可靠的结果。", icon="⚠️")
-            if len(self.df) < 10:
-                st.info("对于小样本数据集，系统将自动调整训练测试集比例和交叉验证方法，但预测结果可能不够稳定。", icon="ℹ️")
+        # 确保数据已加载
+        if self.df is None or self.df.empty:
+            st.error("请先加载数据")
+            return
         
-        # 选择分析类型
-        analysis_type = st.radio(
-            "选择分析类型", 
-            ["预测分析", "聚类分析"],
-            horizontal=True
-        )
+        # 创建两列布局
+        col1, col2 = st.columns([1, 2])
         
-        if analysis_type == "预测分析":
-            st.subheader("预测模型训练")
+        with col1:
+            st.subheader("模型训练参数")
             
             # 选择目标变量
-            target_column = st.selectbox("选择目标变量", self.df.columns)
-            
-            # 选择特征变量
-            feature_candidates = [col for col in self.df.columns if col != target_column]
-            selected_features = st.multiselect(
-                "选择特征变量 (默认使用所有数值型特征)", 
-                feature_candidates
+            target_column = st.selectbox(
+                "选择目标变量", 
+                self.df.columns,
+                help="选择需要预测的目标变量"
             )
             
-            # 模型训练参数
-            col1, col2 = st.columns(2)
-            with col1:
-                # 根据数据集大小调整测试集比例选项
-                if len(self.df) < 10:
-                    min_test_size = max(0.1, 1/len(self.df))
-                    test_size = st.slider("测试集比例", min_test_size, 0.5, min_test_size, 0.05)
-                    st.caption(f"由于样本量较小，测试集至少包含1个样本")
-                else:
-                    test_size = st.slider("测试集比例", 0.1, 0.5, 0.2, 0.05)
-            with col2:
-                scale_method = st.selectbox("特征缩放方法", ["不缩放", "标准化", "归一化"])
-                if scale_method == "不缩放":
-                    scale_method = None
-                elif scale_method == "标准化":
+            # 检查目标变量是否有足够数据
+            if self.df[target_column].isna().sum() > 0.5 * len(self.df):
+                st.warning(f"选择的目标列'{target_column}'有超过50%的缺失值，可能导致预测不准确。")
+            
+            # 检查数据量是否足够
+            if len(self.df) < 10:
+                st.warning(f"⚠️ 警告：当前数据只有{len(self.df)}行，样本量较小。将自动使用留一法交叉验证，但模型预测可能不稳定。建议增加数据量以获得更可靠的结果。")
+            
+            # 选择特征变量
+            numeric_cols = list(self.df.select_dtypes(include=["int64", "float64"]).columns)
+            feature_columns = st.multiselect(
+                "选择特征变量", 
+                [col for col in numeric_cols if col != target_column],
+                help="选择用于预测的特征变量，默认全选所有数值型列"
+            )
+            
+            # 如果没有选择特征，默认使用所有数值列(除了目标变量)
+            if not feature_columns:
+                feature_columns = [col for col in numeric_cols if col != target_column]
+                st.info(f"未选择特征，将使用所有数值列作为特征: {', '.join(feature_columns)}")
+            
+            # 模型类型选择
+            problem_type = st.radio(
+                "问题类型", 
+                ["自动判断", "回归问题", "分类问题"],
+                help="自动判断将根据目标变量的特征决定使用回归还是分类模型"
+            )
+            
+            # 模型选择
+            model_options = {
+                "回归问题": ["线性回归", "随机森林回归", "梯度提升回归", "支持向量回归", "K近邻回归"],
+                "分类问题": ["逻辑回归", "随机森林分类", "梯度提升分类", "支持向量分类", "K近邻分类"]
+            }
+            
+            # 按问题类型选择模型
+            if problem_type == "自动判断":
+                model_type = st.selectbox(
+                    "模型选择", 
+                    ["自动选择最佳模型"] + model_options["回归问题"] + model_options["分类问题"]
+                )
+            elif problem_type == "回归问题":
+                model_type = st.selectbox("模型选择", ["自动选择最佳模型"] + model_options["回归问题"])
+            else:  # 分类问题
+                model_type = st.selectbox("模型选择", ["自动选择最佳模型"] + model_options["分类问题"])
+            
+            # 高级选项
+            with st.expander("高级选项"):
+                test_size = st.slider("测试集比例", 0.1, 0.5, 0.2, 0.05)
+                random_state = st.number_input("随机种子", 0, 1000, 42)
+                scale_method = st.selectbox(
+                    "特征缩放方法", 
+                    [None, "标准化(standard)", "归一化(minmax)"],
+                    format_func=lambda x: "不缩放" if x is None else x
+                )
+                
+                # 映射缩放方法
+                if scale_method == "标准化(standard)":
                     scale_method = "standard"
-                else:
+                elif scale_method == "归一化(minmax)":
                     scale_method = "minmax"
             
-            # 判断目标变量类型
-            is_categorical = False
-            if target_column:
-                target_values = self.df[target_column].dropna().unique()
-                is_categorical = (len(target_values) <= 10 or 
-                                  self.df[target_column].dtype == 'object' or 
-                                  self.df[target_column].dtype.name == 'category')
+            # 训练按钮
+            train_button = st.button("训练模型", use_container_width=True)
+        
+        # 显示训练结果
+        with col2:
+            st.subheader("模型结果")
             
-            # 确定模型类型和可选模型
-            if is_categorical:
-                st.info(f"目标变量 '{target_column}' 被识别为分类变量，将使用分类模型")
-                model_type = st.selectbox(
-                    "选择分类模型", 
-                    ["自动选择最佳模型", "逻辑回归", "随机森林", "梯度提升树", "支持向量机", "K近邻"]
-                )
-                
-                if model_type == "自动选择最佳模型":
-                    model_name = "auto"
-                elif model_type == "逻辑回归":
-                    model_name = "logistic"
-                elif model_type == "随机森林":
-                    model_name = "random_forest"
-                elif model_type == "梯度提升树":
-                    model_name = "gradient_boosting"
-                elif model_type == "支持向量机":
-                    model_name = "svc"
-                else:
-                    model_name = "knn"
-            else:
-                st.info(f"目标变量 '{target_column}' 被识别为连续变量，将使用回归模型")
-                model_type = st.selectbox(
-                    "选择回归模型",
-                    ["自动选择最佳模型", "线性回归", "随机森林", "梯度提升树", "支持向量回归", "K近邻"]
-                )
-                
-                if model_type == "自动选择最佳模型":
-                    model_name = "auto"
-                elif model_type == "线性回归":
-                    model_name = "linear"
-                elif model_type == "随机森林":
-                    model_name = "random_forest"
-                elif model_type == "梯度提升树":
-                    model_name = "gradient_boosting"
-                elif model_type == "支持向量回归":
-                    model_name = "svr"
-                else:
-                    model_name = "knn"
-            
-            # 训练模型按钮
-            if st.button("训练模型"):
-                with st.spinner("模型训练中..."):
-                    try:
-                        # 初始化机器学习模型
+            if train_button:
+                try:
+                    with st.spinner("正在训练模型..."):
+                        # 初始化模型
                         self.ml_model = MLModel(self.df, target_column)
                         
-                        # 数据预处理
-                        feature_columns = selected_features if selected_features else None
+                        # 预处理数据
                         self.ml_model.preprocess_data(
                             feature_columns=feature_columns, 
-                            test_size=test_size,
+                            test_size=test_size, 
+                            random_state=random_state, 
                             scale_method=scale_method
                         )
                         
-                        # 显示划分后的训练集和测试集大小
-                        col1, col2 = st.columns(2)
-                        col1.metric("训练集样本数", len(self.ml_model.y_train))
-                        col2.metric("测试集样本数", len(self.ml_model.y_test))
+                        # 根据不同模型类型和选项训练模型
+                        model_mapping = {
+                            "线性回归": "linear",
+                            "随机森林回归": "random_forest",
+                            "梯度提升回归": "gradient_boosting",
+                            "支持向量回归": "svr",
+                            "K近邻回归": "knn",
+                            "逻辑回归": "logistic",
+                            "随机森林分类": "random_forest",
+                            "梯度提升分类": "gradient_boosting",
+                            "支持向量分类": "svc",
+                            "K近邻分类": "knn"
+                        }
                         
-                        # 如果样本太少，显示警告
-                        if len(self.ml_model.y_train) < 5:
-                            st.warning(f"训练集仅包含 {len(self.ml_model.y_train)} 个样本，模型性能可能不稳定。", icon="⚠️")
-                        
-                        # 训练模型
-                        if model_name == "auto":
+                        if model_type == "自动选择最佳模型":
                             metrics = self.ml_model.auto_train()
-                            st.success(f"自动选择了最佳模型: {metrics.get('model_type', '未知')}")
-                        elif is_categorical:
-                            metrics = self.ml_model.train_classification_model(model_name)
-                            st.success(f"分类模型训练完成")
+                            st.success(f"已自动选择最佳模型: {metrics.get('model_type', '未知')}")
                         else:
-                            metrics = self.ml_model.train_regression_model(model_name)
-                            st.success(f"回归模型训练完成")
-                        
-                        # 显示模型评估结果
-                        st.subheader("模型评估")
-                        
-                        # 显示不同的评估指标
-                        if is_categorical:
-                            metrics_data = [
-                                ['准确率', metrics.get('accuracy', 0)],
-                                ['精确率', metrics.get('precision', '不适用') if metrics.get('precision') is not None else '不适用'],
-                                ['召回率', metrics.get('recall', '不适用') if metrics.get('recall') is not None else '不适用'],
-                                ['F1得分', metrics.get('f1', '不适用') if metrics.get('f1') is not None else '不适用'],
-                                ['交叉验证准确率', metrics.get('cv_accuracy', '不适用') if metrics.get('cv_accuracy') is not None else '不适用']
-                            ]
-                            metrics_df = pd.DataFrame(metrics_data, columns=['指标', '值'])
-                            st.dataframe(metrics_df, use_container_width=True)
+                            # 判断是分类还是回归
+                            is_classification = self.ml_model._is_classification()
                             
-                            # 混淆矩阵
-                            if metrics.get('confusion_matrix') is not None:
-                                st.subheader("混淆矩阵")
-                                confusion_fig = self.ml_model.plot_confusion_matrix()
-                                if confusion_fig is not None:
-                                    st.plotly_chart(confusion_fig, use_container_width=True)
+                            if is_classification:
+                                if model_type in model_options["分类问题"]:
+                                    metrics = self.ml_model.train_classification_model(model_mapping[model_type])
+                                    st.success(f"分类模型训练完成: {model_type}")
+                                else:
+                                    st.error(f"数据适合分类模型，但选择了回归模型: {model_type}")
+                                    return
                             else:
-                                st.info("样本量不足，无法生成混淆矩阵")
-                        else:
-                            metrics_data = [
-                                ['均方误差(MSE)', metrics.get('mse', 0)],
-                                ['均方根误差(RMSE)', metrics.get('rmse', 0)],
-                                ['决定系数(R²)', metrics.get('r2', 0)],
-                                ['交叉验证RMSE', metrics.get('cv_rmse', '不适用') if metrics.get('cv_rmse') is not None else '不适用']
-                            ]
-                            metrics_df = pd.DataFrame(metrics_data, columns=['指标', '值'])
-                            st.dataframe(metrics_df, use_container_width=True)
-                            
-                            # 回归结果可视化
-                            st.subheader("回归结果")
-                            regression_fig = self.ml_model.plot_regression_results()
-                            if regression_fig is not None:
-                                st.plotly_chart(regression_fig, use_container_width=True)
+                                if model_type in model_options["回归问题"]:
+                                    metrics = self.ml_model.train_regression_model(model_mapping[model_type])
+                                    st.success(f"回归模型训练完成: {model_type}")
+                                else:
+                                    st.error(f"数据适合回归模型，但选择了分类模型: {model_type}")
+                                    return
                         
-                        # 特征重要性
-                        importance_fig = self.ml_model.plot_feature_importance()
-                        if importance_fig is not None:
-                            st.subheader("特征重要性")
-                            st.plotly_chart(importance_fig, use_container_width=True)
+                        # 创建选项卡来展示结果
+                        result_tabs = st.tabs(["📊 性能指标", "📈 可视化结果", "🔍 特征重要性"])
                         
-                    except Exception as e:
-                        st.error(f"模型训练过程中出错: {str(e)}")
-                        st.error("如果报错与交叉验证相关，请尝试减少特征数量或增加训练集样本量")
-                        # 显示详细的异常信息
-                        import traceback
-                        st.expander("查看详细错误信息").code(traceback.format_exc())
-            
-            # 模型预测部分
-            if self.ml_model is not None and self.ml_model.model is not None:
-                st.subheader("使用模型进行预测")
-                
-                # 创建预测数据输入表单
-                st.write("输入特征值进行预测:")
-                
-                col_count = min(3, len(self.ml_model.feature_columns))
-                cols = st.columns(col_count)
-                
-                input_data = {}
-                for i, feature in enumerate(self.ml_model.feature_columns):
-                    col_idx = i % col_count
-                    with cols[col_idx]:
-                        # 根据特征类型设置不同的输入控件
-                        if self.df[feature].dtype in ['int64', 'int32']:
-                            input_data[feature] = st.number_input(
-                                f"{feature}", 
-                                value=int(self.df[feature].mean()),
-                                step=1
-                            )
-                        elif self.df[feature].dtype in ['float64', 'float32']:
-                            input_data[feature] = st.number_input(
-                                f"{feature}", 
-                                value=float(self.df[feature].mean()),
-                                format="%.2f"
-                            )
-                        else:
-                            # 对于分类特征，提供唯一值列表
-                            options = self.df[feature].dropna().unique().tolist()
-                            input_data[feature] = st.selectbox(f"{feature}", options)
-                
-                if st.button("预测"):
-                    with st.spinner("正在预测..."):
-                        try:
-                            # 创建预测数据框
-                            pred_df = pd.DataFrame([input_data])
+                        # 性能指标选项卡
+                        with result_tabs[0]:
+                            # 判断是分类还是回归
+                            is_classification = self.ml_model._is_classification()
                             
-                            # 进行预测
-                            prediction = self.ml_model.predict(pred_df)
-                            
-                            # 显示预测结果
-                            st.success("预测完成!")
-                            if is_categorical:
-                                st.metric("预测分类", prediction[0])
+                            if is_classification:
+                                # 分类指标
+                                metrics_df = pd.DataFrame({
+                                    "指标": ["准确率", "精确率", "召回率", "F1分数", "交叉验证准确率"],
+                                    "数值": [
+                                        metrics.get("accuracy", 0),
+                                        metrics.get("precision", 0),
+                                        metrics.get("recall", 0),
+                                        metrics.get("f1", 0),
+                                        metrics.get("cv_accuracy", 0)
+                                    ]
+                                })
                             else:
-                                st.metric("预测值", f"{prediction[0]:.4f}")
-                        
-                        except Exception as e:
-                            st.error(f"预测过程中出错: {str(e)}")
-        
-        else:  # 聚类分析
-            st.subheader("聚类分析")
-            
-            # 选择特征变量
-            all_numeric_cols = list(self.df.select_dtypes(include=['int64', 'float64']).columns)
-            selected_features = st.multiselect(
-                "选择用于聚类的特征 (默认使用所有数值型特征)", 
-                self.df.columns,
-                default=all_numeric_cols[:min(5, len(all_numeric_cols))]
-            )
-            
-            # 聚类方法选择
-            cluster_method = st.selectbox(
-                "选择聚类方法",
-                ["K均值聚类", "DBSCAN密度聚类", "层次聚类"]
-            )
-            
-            # 根据聚类方法设置参数
-            if cluster_method == "K均值聚类":
-                method = "kmeans"
-                n_clusters = st.slider("聚类数量", 2, 10, 3)
-                params = {}
-            
-            elif cluster_method == "DBSCAN密度聚类":
-                method = "dbscan"
-                eps = st.slider("邻域半径(eps)", 0.1, 2.0, 0.5, 0.1)
-                min_samples = st.slider("最小样本数", 2, 20, 5)
-                params = {"eps": eps, "min_samples": min_samples}
-                n_clusters = None
-            
-            else:  # 层次聚类
-                method = "hierarchical"
-                n_clusters = st.slider("聚类数量", 2, 10, 3)
-                linkage = st.selectbox("连接方式", ["ward", "complete", "average", "single"])
-                params = {"linkage": linkage}
-            
-            # 执行聚类
-            if st.button("执行聚类"):
-                with st.spinner("正在进行聚类分析..."):
-                    try:
-                        # 初始化聚类模型
-                        self.ml_model = MLModel(self.df)
-                        if selected_features:
-                            self.ml_model.feature_columns = selected_features
-                        
-                        # 执行聚类
-                        if n_clusters:
-                            result = self.ml_model.perform_clustering(method, n_clusters, params)
-                        else:
-                            result = self.ml_model.perform_clustering(method, params=params)
-                        
-                        # 显示聚类结果
-                        st.success(f"聚类完成: 识别出 {len(set(result['labels'])) - (1 if -1 in result['labels'] else 0)} 个聚类")
-                        
-                        # 聚类评估
-                        if 'silhouette_score' in result:
-                            st.metric("轮廓系数", f"{result['silhouette_score']:.4f}")
+                                # 回归指标
+                                metrics_df = pd.DataFrame({
+                                    "指标": ["均方误差(MSE)", "均方根误差(RMSE)", "决定系数(R²)", "交叉验证RMSE"],
+                                    "数值": [
+                                        metrics.get("mse", 0),
+                                        metrics.get("rmse", 0),
+                                        metrics.get("r2", 0),
+                                        metrics.get("cv_rmse", 0)
+                                    ]
+                                })
                             
-                        # 可视化聚类结果
-                        st.subheader("聚类结果可视化")
+                            st.dataframe(metrics_df, use_container_width=True)
                         
-                        viz_method = st.radio(
-                            "可视化方法",
-                            ["PCA降维", "使用原始特征"],
-                            horizontal=True
-                        )
+                        # 可视化结果选项卡
+                        with result_tabs[1]:
+                            if is_classification:
+                                # 显示混淆矩阵
+                                conf_fig = self.ml_model.plot_confusion_matrix()
+                                if conf_fig is not None:
+                                    st.plotly_chart(conf_fig, use_container_width=True)
+                                else:
+                                    st.info("无法生成混淆矩阵")
+                            else:
+                                # 显示回归结果
+                                reg_fig = self.ml_model.plot_regression_results()
+                                if reg_fig is not None:
+                                    st.plotly_chart(reg_fig, use_container_width=True)
+                                else:
+                                    st.info("无法生成回归结果图")
                         
-                        cluster_viz = self.ml_model.visualize_clusters(
-                            'pca' if viz_method == "PCA降维" else 'original'
-                        )
-                        st.plotly_chart(cluster_viz, use_container_width=True)
-                        
-                        # 聚类统计
-                        st.subheader("聚类统计")
-                        cluster_counts = self.ml_model.df['cluster'].value_counts().reset_index()
-                        cluster_counts.columns = ['聚类编号', '样本数量']
-                        st.dataframe(cluster_counts, use_container_width=True)
-                        
-                        # 各聚类特征分布
-                        st.subheader("各聚类特征分布")
-                        cluster_stats = self.ml_model.df.groupby('cluster')[selected_features].mean()
-                        st.dataframe(cluster_stats, use_container_width=True)
-                        
-                        # 下载聚类结果
-                        csv = self.ml_model.df.to_csv(index=False)
-                        st.download_button(
-                            "下载聚类结果数据",
-                            csv,
-                            "clustered_data.csv",
-                            "text/csv",
-                            key='download-csv'
-                        )
+                        # 特征重要性选项卡
+                        with result_tabs[2]:
+                            # 显示特征重要性
+                            importance_fig = self.ml_model.plot_feature_importance()
+                            if importance_fig is not None:
+                                st.plotly_chart(importance_fig, use_container_width=True)
+                            else:
+                                st.info("当前模型不支持特征重要性展示")
                     
-                    except Exception as e:
-                        st.error(f"聚类分析过程中出错: {str(e)}")
+                    # 添加模型预测功能
+                    with st.expander("模型预测", expanded=True):
+                        st.write("使用训练好的模型进行预测")
+                        
+                        # 创建输入表单
+                        prediction_data = {}
+                        for col in feature_columns:
+                            if col in numeric_cols:
+                                min_val = float(self.df[col].min())
+                                max_val = float(self.df[col].max())
+                                mean_val = float(self.df[col].mean())
+                                
+                                prediction_data[col] = st.slider(
+                                    f"{col}", 
+                                    min_val, 
+                                    max_val, 
+                                    mean_val,
+                                    help=f"范围: [{min_val:.2f}, {max_val:.2f}], 平均值: {mean_val:.2f}"
+                                )
+                        
+                        if st.button("预测", use_container_width=True):
+                            try:
+                                # 预测
+                                input_df = pd.DataFrame([prediction_data])
+                                prediction = self.ml_model.predict(input_df)
+                                
+                                # 显示预测结果
+                                st.success(f"预测结果: {prediction[0]}")
+                                
+                                # 如果是分类，显示每个类别的概率(如果模型支持)
+                                if is_classification and hasattr(self.ml_model.model, "predict_proba"):
+                                    proba = self.ml_model.model.predict_proba(self.ml_model.scaler.transform(input_df) if self.ml_model.scaler else input_df)
+                                    
+                                    # 获取类别标签
+                                    if self.ml_model.label_encoder is not None:
+                                        class_labels = self.ml_model.label_encoder.classes_
+                                    else:
+                                        class_labels = [f"类别 {i}" for i in range(proba.shape[1])]
+                                    
+                                    # 显示概率
+                                    proba_df = pd.DataFrame({
+                                        "类别": class_labels,
+                                        "概率": proba[0]
+                                    })
+                                    st.dataframe(proba_df, use_container_width=True)
+                                    
+                                    # 绘制概率条形图
+                                    fig = px.bar(
+                                        proba_df, 
+                                        x="类别", 
+                                        y="概率", 
+                                        title="各类别预测概率",
+                                        text="概率"
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                            except Exception as e:
+                                st.error(f"预测失败: {str(e)}")
+                
+                except Exception as e:
+                    st.error(f"模型训练失败: {str(e)}")
+                    st.error("请检查数据格式和选择的特征是否合适")
+                    import traceback
+                    st.code(traceback.format_exc())
     
     def _render_data_report(self):
         """数据报告选项卡内容"""
